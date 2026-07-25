@@ -105,7 +105,7 @@ export const useWeather = () => {
         } else if (err.message === "LOCATION_ERROR") {
           message = "تعذر الحصول على الموقع";
           setData(null);
-        } else if (err.message.includes("NETWORK")) {
+        } else if (err.message === "NETWORK_ERROR") {
           message = "لا يوجد اتصال بالإنترنت";
           shouldLoadCache = true;
         } else {
