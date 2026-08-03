@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { InteractionManager } from "react-native";
-import { weatherService } from "../api/weatherService";
+import {
+  useLazyGetCurrentWeatherByCityQuery,
+  useLazyGetCurrentWeatherByCoordsQuery,
+  useLazyGetForecastByCityQuery,
+  useLazyGetForecastByCoordsQuery,
+} from "../api/weatherApi";
 import { locationService } from "../services/locationService";
 import { storageService } from "../services/storageService";
 import { ForecastItem, TemperatureUnit, WeatherData } from "../types/weather";
@@ -12,6 +17,11 @@ export const useWeather = () => {
   const [unit, setUnit] = useState<TemperatureUnit>("C");
   const [currentCity, setCurrentCity] = useState<string>("");
 
+  const [triggerCurrentByCity] = useLazyGetCurrentWeatherByCityQuery();
+  const [triggerCurrentByCoords] = useLazyGetCurrentWeatherByCoordsQuery();
+  const [triggerForecastByCity] = useLazyGetForecastByCityQuery();
+  const [triggerForecastByCoords] = useLazyGetForecastByCoordsQuery();
+
   const fetchWeather = useCallback(
     async (city?: string, useLocation = false) => {
       setLoading(true);
@@ -22,22 +32,32 @@ export const useWeather = () => {
 
         if (useLocation) {
           const coords = await locationService.getCurrentLocation();
-          current = await weatherService.getCurrentByCoords(
-            coords.lat,
-            coords.lon,
-          );
-          forecastRaw = await weatherService.getForecast(coords);
+
+          const currentResult = await triggerCurrentByCoords(coords);
+          if (currentResult.error) throw currentResult.error;
+          current = currentResult.data;
+
+          const forecastResult = await triggerForecastByCoords(coords);
+          if (forecastResult.error) throw forecastResult.error;
+          forecastRaw = forecastResult.data;
         } else if (city) {
-          current = await weatherService.getCurrentWeather(city);
-          forecastRaw = await weatherService.getForecast(city);
+          const currentResult = await triggerCurrentByCity(city);
+          if (currentResult.error) throw currentResult.error;
+          current = currentResult.data;
+
+          const forecastResult = await triggerForecastByCity(city);
+          if (forecastResult.error) throw forecastResult.error;
+          forecastRaw = forecastResult.data;
         } else {
           throw new Error("NO_INPUT");
         }
 
+        if (!current || !forecastRaw) throw new Error("API_ERROR");
+
         const groupedByDay: { [date: string]: ForecastItem[] } = {};
 
         forecastRaw.list.forEach((item: ForecastItem) => {
-          const date = item.dt_txt.split(" ")[0]; // "2026-07-24"
+          const date = item.dt_txt.split(" ")[0];
           if (!groupedByDay[date]) groupedByDay[date] = [];
           groupedByDay[date].push(item);
         });
@@ -63,40 +83,38 @@ export const useWeather = () => {
           return {
             ...midDayItem,
             dt_txt: `${date} 12:00:00`,
-            main: {
-              ...midDayItem.main,
-              temp_max,
-              temp_min,
-            },
+            main: { ...midDayItem.main, temp_max, temp_min },
           };
         };
 
-        const todayDate = sortedDates[0];
+        const todayDateStr = new Date().toISOString().split("T")[0];
+        const futureDates = sortedDates.filter((d) => d !== todayDateStr);
+        const todayDate =
+          sortedDates.find((d) => d === todayDateStr) || sortedDates[0];
+
         const todayForecast = todayDate
           ? buildDayItem(todayDate, current.main.temp)
           : null;
 
-        const forecast: ForecastItem[] = sortedDates
-          .slice(1, 6)
+        const forecast: ForecastItem[] = futureDates
+          .slice(0, 5)
           .map((d) => buildDayItem(d));
 
-        setData((prev) => {
-          const weatherData: WeatherData = {
-            current,
-            forecast,
-            todayForecast,
-            unit: prev?.unit ?? "C",
-          };
-          storageService.saveWeather(weatherData);
-          return weatherData;
-        });
+        setData((prev) => ({
+          current,
+          forecast,
+          todayForecast,
+          unit: prev?.unit ?? "C",
+        }));
 
         setCurrentCity(current.name);
       } catch (err: any) {
         let message = "حدث خطأ غير متوقع";
         let shouldLoadCache = false;
 
-        if (err.message === "CITY_NOT_FOUND") {
+        const status = err?.status;
+
+        if (status === 404) {
           message = "المدينة غير موجودة، جرب اسم آخر";
           setData(null);
         } else if (err.message === "LOCATION_PERMISSION_DENIED") {
@@ -105,7 +123,10 @@ export const useWeather = () => {
         } else if (err.message === "LOCATION_ERROR") {
           message = "تعذر الحصول على الموقع";
           setData(null);
-        } else if (err.message === "NETWORK_ERROR") {
+        } else if (
+          status === "FETCH_ERROR" ||
+          err.message === "NETWORK_ERROR"
+        ) {
           message = "لا يوجد اتصال بالإنترنت";
           shouldLoadCache = true;
         } else {
@@ -122,8 +143,19 @@ export const useWeather = () => {
         setLoading(false);
       }
     },
-    [],
+    [
+      triggerCurrentByCity,
+      triggerCurrentByCoords,
+      triggerForecastByCity,
+      triggerForecastByCoords,
+    ],
   );
+
+  useEffect(() => {
+    if (data) {
+      storageService.saveWeather(data);
+    }
+  }, [data]);
 
   const toggleUnit = () => {
     const newUnit: TemperatureUnit = unit === "C" ? "F" : "C";
